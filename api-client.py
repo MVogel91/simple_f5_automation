@@ -105,26 +105,30 @@ def backup_and_update_iRule(bigip:BIGIP, client:dict, rule:str, new_rule:str):
     Create a backup for an iRule before deploying a new version on the existing object
     '''
     response = client.get(system=bigip, uri=f'/mgmt/tm/ltm/rule/{rule}')
-    irule_definition = response.json()['apiAnonymous']
-    if irule_definition == new_rule:
-        # Requirement already satisfied
-        print(f'{bigip.name}: {rule}: iRule already up to date')
-        return
-
-    response = client.post(system=bigip, uri=f'/mgmt/tm/ltm/rule', data={'name': f'{rule}_backup', 'apiAnonymous': f'{irule_definition}'})
-    if response.status_code == 409:
-        # Backup exists
-        response = client.put(system=bigip, uri=f'/mgmt/tm/ltm/rule/{rule}_backup', data={'apiAnonymous': f'{irule_definition}'})
-        if response.status_code == 200:
-            print(f'{bigip.name}: {rule}: Older Backup existed, overwritten')
-    elif response.status_code == 200:
-        # Backup created
-        print(f'{bigip.name}: {rule}: Backup successfully created')
-
-    response = client.put(system=bigip, uri=f'/mgmt/tm/ltm/rule/{rule}', data={'apiAnonymous': f'{new_rule}'})
     if response.status_code == 200:
-        # iRule updated
-        print(f'{bigip.name}: {rule}: iRule successfully updated')
+        irule_definition = response.json()['apiAnonymous']
+        if irule_definition == new_rule:
+            # Requirement already satisfied
+            print(f'{bigip.name}: {rule}: iRule already up to date')
+            return
+
+        response = client.post(system=bigip, uri=f'/mgmt/tm/ltm/rule', data={'name': f'{rule}_backup', 'apiAnonymous': f'{irule_definition}'})
+        if response.status_code == 409:
+            # Backup exists
+            response = client.put(system=bigip, uri=f'/mgmt/tm/ltm/rule/{rule}_backup', data={'apiAnonymous': f'{irule_definition}'})
+            if response.status_code == 200:
+                print(f'{bigip.name}: {rule}: Older Backup existed, overwritten')
+        elif response.status_code == 200:
+            # Backup created
+            print(f'{bigip.name}: {rule}: Backup successfully created')
+
+        response = client.put(system=bigip, uri=f'/mgmt/tm/ltm/rule/{rule}', data={'apiAnonymous': f'{new_rule}'})
+        if response.status_code == 200:
+            # iRule updated
+            print(f'{bigip.name}: {rule}: iRule successfully updated')
+    elif response.status_code == 404:
+        print(f'{bigip.name}: {rule}: iRule non-existant on system')
+
 
 
 '''
