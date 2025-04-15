@@ -12,16 +12,16 @@
 ```
 f5_all:
   hosts:
-    bigip-prod-01
-    bigip-prod-02
-    bigip-qa-01
-    bigip-qa-02
+    bigip-prod-01:
+    bigip-prod-02:
+    bigip-qa-01:
+    bigip-qa-02:
 f5_prod:
   hosts:
-    bigip-prod-01
-    bigip-prod-02
+    bigip-prod-01:
+    bigip-prod-02:
 f5_qa:
   hosts:
-    bigip-qa-01
-    bigip-qa-02
+    bigip-qa-01:
+    bigip-qa-02:
 ```
