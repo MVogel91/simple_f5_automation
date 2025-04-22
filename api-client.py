@@ -129,6 +129,92 @@ def backup_and_update_iRule(bigip:BIGIP, client:dict, rule:str, new_rule:str):
     elif response.status_code == 404:
         print(f'{bigip.name}: {rule}: iRule non-existant on system')
 
+def find_unused_pools(bigip:BIGIP, client:dict):
+    '''
+    pool references
+    '''
+    pool_references = {
+        "virtual": {
+            "uri": "/ltm/virtual",
+            "property": "pool"
+        },
+        "access_ldap": {
+            "uri": "/apm/aaa/ldap",
+            "property": "pool"
+        },
+        "access_active_directory": {
+            "uri": "/apm/aaa/active-directory",
+            "property": "pool"
+        },
+        "access_radius": {
+            "uri": "/apm/aaa/radius",
+            "property": "pool"
+        },
+        "access_crldp": {
+            "uri": "/apm/aaa/crldp",
+            "property": "pool"
+        },
+        "access_tacacs": {
+            "uri": "/apm/aaa/tacacsplus",
+            "property": "pool"
+        },
+        "access_policy": {
+            "uri": "/apm/policy/agent/resource-assign/",
+            "property": "pool",
+            "property_array": "rules"
+        },
+        "sys_log_destination": {
+            "uri": "/sys/log-config/destination/remote-high-speed-log",
+            "property": "poolName"
+        }
+    }
+    pool_names_response = client.get(system=bigip, uri=f'/mgmt/tm/ltm/pool/?$select=name')
+    unused_pools = list()
+    if pool_names_response.status_code == 200:
+        for pool in pool_names_response.json()['items']:
+            unused_pools.append(pool['name'])
+        
+        used_pools = list()
+        for reference in pool_references:
+            ref = pool_references[reference]
+            attr = ref["property"]
+            uri = ref["uri"]
+            if "property_array" in ref:
+                ref_array = ref["property_array"]
+                ref_response = client.get(system=bigip, uri=f'/mgmt/tm{uri}?$select={attr},{ref_array}')
+            else:    
+                ref_response = client.get(system=bigip, uri=f'/mgmt/tm{uri}?$select={attr}')
+            if ref_response.status_code == 200:
+                for item in ref_response.json()['items']:
+                    if attr in item:
+                        for pool in unused_pools:
+                            if pool == item[attr]:
+                                unused_pools.remove(pool)
+                                continue
+                            elif f'/Common/{pool}' == item[attr]:
+                                unused_pools.remove(pool)
+                                continue
+                    elif "property_array" in ref and ref_array in item:
+                        for sub_item in item[ref_array]:
+                            if attr in sub_item:
+                                for pool in unused_pools:
+                                    if pool == sub_item[attr]:
+                                        unused_pools.remove(pool)
+                                        continue
+                                    elif f'/Common/{pool}' == sub_item[attr]:
+                                        unused_pools.remove(pool)
+                                        continue
+                    else:
+                        print(f'{bigip.name}: Item {item} has no attr {attr}')
+            for pool in used_pools:
+                if pool in unused_pools:
+                    unused_pools.remove(pool)
+        if unused_pools == []:
+            print(f'{bigip.name}: No possibly unsused Pools identified.')
+        else:
+            print(f'{bigip.name}: Possibly unused Pools: {unused_pools}')
+    elif pool_names_response.status_code == 404:
+        print(f'{bigip.name}: No pools found on system. Probably a vCMP host')
 
 
 '''
@@ -138,7 +224,7 @@ parser = argparse.ArgumentParser(
                     prog='F5 API Automation Client',
                     description='Automate simple F5 BIG-IP tasks',
                     epilog='With great power comes great responsibility.')
-parser.add_argument('action', help='Action to perform', choices=['update_irule','show_bigips'])
+parser.add_argument('action', help='Action to perform', choices=['update_irule','show_bigips','unused_pools'])
 parser.add_argument('-b', '--bigips', help='Select a category of hosts to apply the task to', required=True)
 parser.add_argument('-u', '--username', help='BIG-IP username')
 parser.add_argument('-p', '--password', help='BIG-IP password')
@@ -201,3 +287,7 @@ match args.action:
     case 'show_bigips':
         for host in yaml_content[args.bigips]['hosts']:
             print(host)
+    case 'unused_pools':
+        for host in yaml_content[args.bigips]['hosts']:
+            bigip = BIGIP(name=host, verifyCert=ca)
+            find_unused_pools(bigip=bigip, client=client)
