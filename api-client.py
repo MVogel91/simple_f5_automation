@@ -205,7 +205,8 @@ def find_unused_pools(bigip:BIGIP, client:dict):
                                         unused_pools.remove(pool)
                                         continue
                     else:
-                        print(f'{bigip.name}: Item {item} has no attr {attr}')
+                        #print(f'{bigip.name}: Item {item} has no attr {attr}')
+                        pass
             for pool in used_pools:
                 if pool in unused_pools:
                     unused_pools.remove(pool)
@@ -213,6 +214,16 @@ def find_unused_pools(bigip:BIGIP, client:dict):
             print(f'{bigip.name}: No possibly unsused Pools identified.')
         else:
             print(f'{bigip.name}: Possibly unused Pools: {unused_pools}')
+            
+            # Double-Verify usage of pools in config files:
+            grep_pools = [s + "$" for s in unused_pools]
+            cmd_args = f"-c 'grep -P \"^\\S+|{"|".join(grep_pools)}\" /config/bigip.conf | grep -v \"ltm pool\" | grep -B1 -P \"{"|".join(grep_pools)}\"'"
+            #print(cmd_args)
+            verify_response = client.post(system=bigip, uri=f'/mgmt/tm/util/bash', data={"command":"run", "utilCmdArgs":cmd_args})
+            if verify_response.status_code == 200:
+                if "commandResult" in verify_response.json():
+                    print(f'{bigip.name}: possible conflicts:\n{verify_response.json()["commandResult"]}')
+
     elif pool_names_response.status_code == 404:
         print(f'{bigip.name}: No pools found on system. Probably a vCMP host')
 
