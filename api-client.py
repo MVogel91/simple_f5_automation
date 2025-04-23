@@ -5,6 +5,7 @@ import yaml
 import argparse
 import getpass
 import urllib3
+import os
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class BIGIP:
@@ -53,7 +54,7 @@ class APIClient:
         session = requests.Session()
         self.__authenticate(system=system, session=session)
 
-    def __api_call(self, system:BIGIP, method:str, uri:str, data:dict=dict()):
+    def __api_call(self, system:BIGIP, method:str, uri:str, headers:dict(), data:dict=dict(), json:bool=True):
         if system is None:
             raise Exception ('No system specified!')
         if method == '':
@@ -62,40 +63,51 @@ class APIClient:
             raise Exception ('No Payload specified for POST/PATCH')
         if uri == '':
             raise Exception ('No URI specified')
-        
+
         token = self.__get_or_create_session(system=system)["token"]["value"]
+        default_headers = {
+            'Accept-Encoding': 'application/json',
+            'X-F5-Auth-Token': token
+        }
+        for header in default_headers:
+            if header not in headers:
+                headers[header] = default_headers[header]
+
         session = requests.Session()
         match method:
             case 'get':
-                response = session.get(url=f'https://{system.name}:{system.port}{uri}', headers={'Accept-Encoding': 'application/json', 'X-F5-Auth-Token': token}, verify=bigip.verifyCert)
+                response = session.get(url=f'https://{system.name}:{system.port}{uri}', headers=headers, verify=bigip.verifyCert)
                 return response
             case 'post':
-                response = session.post(url=f'https://{system.name}:{system.port}{uri}', headers={'Content-Type': 'application/json', 'X-F5-Auth-Token': token}, json=data, verify=bigip.verifyCert)
+                if json == True:
+                    response = session.post(url=f'https://{system.name}:{system.port}{uri}', headers=headers, json=data, verify=bigip.verifyCert)
+                else:
+                    response = session.post(url=f'https://{system.name}:{system.port}{uri}', headers=headers, data=data, verify=bigip.verifyCert)
                 return response
             case 'put':
-                response = session.put(url=f'https://{system.name}:{system.port}{uri}', headers={'Content-Type': 'application/json', 'X-F5-Auth-Token': token}, json=data, verify=bigip.verifyCert)
+                response = session.put(url=f'https://{system.name}:{system.port}{uri}', headers=headers, json=data, verify=bigip.verifyCert)
                 return response
             case 'patch':
-                response = session.patch(url=f'https://{system.name}:{system.port}{uri}', headers={'Content-Type': 'application/json', 'X-F5-Auth-Token': token}, json=data, verify=bigip.verifyCert)
+                response = session.patch(url=f'https://{system.name}:{system.port}{uri}', headers=headers, json=data, verify=bigip.verifyCert)
                 return response
             case 'delete':
-                response = session.delete(url=f'https://{system.name}:{system.port}{uri}', headers={'Content-Type': 'application/json', 'X-F5-Auth-Token': token}, verify=bigip.verifyCert)
+                response = session.delete(url=f'https://{system.name}:{system.port}{uri}', headers=headers, verify=bigip.verifyCert)
                 return response 
 
-    def get(self, system:BIGIP, uri:str):
-        return self.__api_call(system=system, method='get', uri=uri)
+    def get(self, system:BIGIP, uri:str, headers:dict):
+        return self.__api_call(system=system, method='get', uri=uri, headers=headers)
     
-    def delete(self, system:BIGIP, uri:str):
-        return self.__api_call(system=system, method='delete', uri=uri)
+    def delete(self, system:BIGIP, uri:str, headers:dict):
+        return self.__api_call(system=system, method='delete', uri=uri, headers=headers)
     
-    def post(self, system:BIGIP, uri:str, data:dict=dict()):
-        return self.__api_call(system=system, method='post', uri=uri, data=data)
+    def post(self, system:BIGIP, uri:str, headers:dict, data:dict=dict(), json:bool=True):
+        return self.__api_call(system=system, method='post', uri=uri, headers=headers, data=data, json=json)
 
-    def put(self, system:BIGIP, uri:str, data:dict=dict()):
-        return self.__api_call(system=system, method='put', uri=uri, data=data)
+    def put(self, system:BIGIP, uri:str, headers:dict, data:dict=dict()):
+        return self.__api_call(system=system, method='put', uri=uri, headers=headers, data=data)
     
-    def patch(self, system:BIGIP, uri:str, data:dict=dict()):
-        return self.__api_call(system=system, method='patch', uri=uri, data=data)
+    def patch(self, system:BIGIP, uri:str, headers:dict, data:dict=dict()):
+        return self.__api_call(system=system, method='patch', uri=uri, headers=headers, data=data)
 
 '''
 Supported features
@@ -225,6 +237,33 @@ def find_unused_pools(bigip:BIGIP, client:dict):
     elif pool_names_response.status_code == 404:
         print(f'{bigip.name}: No pools found on system. Probably a vCMP host')
 
+def upload_file(bigip:BIGIP, client:dict, file, location:str, filename:str, size:int):
+    chunk_size = 1000000
+    headers = {
+        'Content-Type': 'application/octet-stream'
+    }
+    
+    basename = os.path.basename(filename)
+    if os.path.splitext(basename)[-1] == '.iso':
+        uri = f'/mgmt/cm/autodeploy/software-image-uploads/{basename}'
+    else:
+        uri = f'/mgmt/shared/file-transfer/uploads/{basename}'
+
+    start = 0
+
+    while True:
+        file_slice = file.read(chunk_size)
+        if not file_slice:
+            break
+
+        current_bytes = len(file_slice)
+        end = min(start+current_bytes, size)
+
+        headers['Content-Range'] = f"{start}-{end-1}/{size}"
+        client.post(system=bigip, uri=uri, data=file_slice, headers=headers, json=False)
+
+        print (f"Progress {int(round(1000*end/size,3))/10}% ({end} / {size})", end="\r")
+        start += current_bytes
 
 '''
 Arguments Parser
@@ -233,7 +272,7 @@ parser = argparse.ArgumentParser(
                     prog='F5 API Automation Client',
                     description='Automate simple F5 BIG-IP tasks',
                     epilog='With great power comes great responsibility.')
-parser.add_argument('action', help='Action to perform', choices=['update_irule','show_bigips','unused_pools'])
+parser.add_argument('action', help='Action to perform', choices=['update_irule','show_bigips','unused_pools','upload_file'])
 parser.add_argument('-b', '--bigips', help='Select a category of hosts to apply the task to', required=True)
 parser.add_argument('-u', '--username', help='BIG-IP username')
 parser.add_argument('-p', '--password', help='BIG-IP password')
@@ -242,13 +281,14 @@ parser.add_argument('-k', '--ignore_cert', help='completely ignore Certificate i
 parser.add_argument('--ca_file', help='CA file to trust for BIG-IP certificates')
 parser.add_argument('--irule_name', help='Name of iRule to update. Required for update_irule action')
 parser.add_argument('--irule_content', help='File with content for iRule update. Required for update_irule action')
+parser.add_argument('--file_name', help='File to upload')
+parser.add_argument('--file_location', help='Location where to upload the file')
 args = parser.parse_args()
 
 
 '''
 Applicable hosts
 '''
-
 try:
     f = open(args.inventory_file)
 except FileNotFoundError:
@@ -286,12 +326,12 @@ Actions
 '''
 match args.action:
     case 'update_irule':
+        if args.irule_name == None or args.irule_content == None:
+            raise Exception('update_irule module requires flags --irule_name and --irule_content')
+        irule_content = open(args.irule_content).read().rstrip() # Remove trailing whitespaces / EOF, ...
+        
         for host in yaml_content[args.bigips]['hosts']:
             bigip = BIGIP(name=host, verifyCert=ca)
-
-            if args.irule_name == None or args.irule_content == None:
-                raise Exception('update_irule module requires flags --irule_name and --irule_content')
-            irule_content = open(args.irule_content).read().rstrip() # Remove trailing whitespaces / EOF, ...
             backup_and_update_iRule(bigip=bigip, client=client, rule=args.irule_name, new_rule=irule_content)
     case 'show_bigips':
         for host in yaml_content[args.bigips]['hosts']:
@@ -300,3 +340,12 @@ match args.action:
         for host in yaml_content[args.bigips]['hosts']:
             bigip = BIGIP(name=host, verifyCert=ca)
             find_unused_pools(bigip=bigip, client=client)
+    case 'upload_file':
+        if args.file_name == None or args.file_location == None:
+            raise Exception('upload_file module requires flags --file_name and --file_location')
+        file = open(args.file_name, 'rb')
+        size = os.path.getsize(args.file_name)
+
+        for host in yaml_content[args.bigips]['hosts']:
+            bigip = BIGIP(name=host, verifyCert=ca)
+            upload_file(bigip=bigip, client=client, file=file, location=args.file_location, filename=args.file_name, size=size)
