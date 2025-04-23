@@ -237,12 +237,19 @@ def find_unused_pools(bigip:BIGIP, client:dict):
     elif pool_names_response.status_code == 404:
         print(f'{bigip.name}: No pools found on system. Probably a vCMP host')
 
-def upload_file(bigip:BIGIP, client:dict, file, location:str, filename:str, size:int):
+def upload_file(bigip:BIGIP, client:dict, location:str, filename:str):
     chunk_size = 1000000
     headers = {
         'Content-Type': 'application/octet-stream'
     }
     
+    file = open(filename, 'rb')
+    size = os.path.getsize(filename)
+    if size > 1024*1024*1024:
+        total = f'{int(size/1024/1024):,} MB'
+    else:
+        total = f'{int(size/1024):,} KB'
+
     basename = os.path.basename(filename)
     if os.path.splitext(basename)[-1] == '.iso':
         uri = f'/mgmt/cm/autodeploy/software-image-uploads/{basename}'
@@ -251,19 +258,29 @@ def upload_file(bigip:BIGIP, client:dict, file, location:str, filename:str, size
 
     start = 0
 
-    while True:
+    while start < size:
         file_slice = file.read(chunk_size)
-        if not file_slice:
-            break
 
         current_bytes = len(file_slice)
         end = min(start+current_bytes, size)
 
         headers['Content-Range'] = f"{start}-{end-1}/{size}"
-        client.post(system=bigip, uri=uri, data=file_slice, headers=headers, json=False)
+        try:
+            response = client.post(system=bigip, uri=uri, data=file_slice, headers=headers, json=False)
+        except requests.exceptions.ConnectionError:
+            return False
 
-        print (f"Progress {int(round(1000*end/size,3))/10}% ({end} / {size})", end="\r")
+        if response.status_code != 200:
+            return False
+        
+        if size > 1024*1024*1024:
+            current = f'{int(end/1024/1024):,} MB'
+        else:
+            current = f'{int(end/1024):,} KB'
+        print (f"Progress {int(round(1000*end/size,3))/10}% ({current} / {total})", end="\r")
         start += current_bytes
+    file.close()
+    return True
 
 '''
 Arguments Parser
@@ -341,11 +358,13 @@ match args.action:
             bigip = BIGIP(name=host, verifyCert=ca)
             find_unused_pools(bigip=bigip, client=client)
     case 'upload_file':
-        if args.file_name == None or args.file_location == None:
-            raise Exception('upload_file module requires flags --file_name and --file_location')
-        file = open(args.file_name, 'rb')
-        size = os.path.getsize(args.file_name)
+        if args.file_name == None:
+            raise Exception('upload_file module requires flag --file_name')
 
         for host in yaml_content[args.bigips]['hosts']:
             bigip = BIGIP(name=host, verifyCert=ca)
-            upload_file(bigip=bigip, client=client, file=file, location=args.file_location, filename=args.file_name, size=size)
+            success = upload_file(bigip=bigip, client=client, location=args.file_location, filename=args.file_name)
+            if success:
+                print(f'{bigip.name}: upload successful')
+            else:
+                print(f'{bigip.name}: upload failed')
