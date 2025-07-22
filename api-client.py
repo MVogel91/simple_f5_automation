@@ -6,6 +6,7 @@ import argparse
 import getpass
 import urllib3
 import os
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class BIGIP:
@@ -267,7 +268,8 @@ def upload_file(bigip:BIGIP, client:dict, location:str, filename:str):
         headers['Content-Range'] = f"{start}-{end-1}/{size}"
         try:
             response = client.post(system=bigip, uri=uri, data=file_slice, headers=headers, json=False)
-        except requests.exceptions.ConnectionError:
+        except requests.exceptions.ConnectionError as e:
+            print(e)
             return False
 
         if response.status_code != 200:
@@ -280,6 +282,17 @@ def upload_file(bigip:BIGIP, client:dict, location:str, filename:str):
         print (f"Progress {int(round(1000*end/size,3))/10}% ({current} / {total})", end="\r")
         start += current_bytes
     file.close()
+
+    if location != "":
+        payload = {
+            "command": "run",
+            "utilCmdArgs": f"/var/config/rest/downloads/{filename} {location}"
+        }
+        headers = { "Content-Type": "application/json" }
+        resp = client.post(system=bigip, uri="/mgmt/tm/util/unix-mv", data=payload, headers=headers)
+        if resp.status_code != 200:
+            return False
+
     return True
 
 '''
