@@ -55,7 +55,7 @@ class APIClient:
         session = requests.Session()
         self.__authenticate(system=system, session=session)
 
-    def __api_call(self, system:BIGIP, method:str, uri:str, headers:dict(), data:dict=dict(), json:bool=True):
+    def __api_call(self, system:BIGIP, method:str, uri:str, headers:dict, data:dict=dict(), json:bool=True):
         if system is None:
             raise Exception ('No system specified!')
         if method == '':
@@ -238,7 +238,7 @@ def find_unused_pools(bigip:BIGIP, client:dict):
     elif pool_names_response.status_code == 404:
         print(f'{bigip.name}: No pools found on system. Probably a vCMP host')
 
-def upload_file(bigip:BIGIP, client:dict, location:str, filename:str):
+def upload_file(bigip:BIGIP, client:dict, filename:str):
     chunk_size = 1000000
     headers = {
         'Content-Type': 'application/octet-stream'
@@ -266,11 +266,7 @@ def upload_file(bigip:BIGIP, client:dict, location:str, filename:str):
         end = min(start+current_bytes, size)
 
         headers['Content-Range'] = f"{start}-{end-1}/{size}"
-        try:
-            response = client.post(system=bigip, uri=uri, data=file_slice, headers=headers, json=False)
-        except requests.exceptions.ConnectionError as e:
-            print(e)
-            return False
+        response = client.post(system=bigip, uri=uri, data=file_slice, headers=headers, json=False)
 
         if response.status_code != 200:
             return False
@@ -283,16 +279,36 @@ def upload_file(bigip:BIGIP, client:dict, location:str, filename:str):
         start += current_bytes
     file.close()
 
-    if location != "":
-        payload = {
-            "command": "run",
-            "utilCmdArgs": f"/var/config/rest/downloads/{filename} {location}"
-        }
-        headers = { "Content-Type": "application/json" }
-        resp = client.post(system=bigip, uri="/mgmt/tm/util/unix-mv", data=payload, headers=headers)
-        if resp.status_code != 200:
-            return False
+    return True
 
+def move_file(bigip:BIGIP, client:dict, source:str, destination:str):
+    '''
+    Move file to a different location on the BIG-IP
+    '''
+    payload = {
+        "command": "run",
+        "utilCmdArgs": f"{source} {destination}"
+    }
+    headers = { "Content-Type": "application/json" }
+    resp = client.post(system=bigip, uri="/mgmt/tm/util/unix-mv", data=payload, headers=headers)
+    if resp.status_code != 200:
+        return False
+    
+    return True
+
+def linux_command(bigip:BIGIP, client:dict, command:str):
+    '''
+    Execute a Linux command on the BIG-IP
+    '''
+    payload = {
+        "command": "run",
+        "utilCmdArgs": f"-c '{command}'"
+    }
+    headers = { "Content-Type": "application/json" }
+    resp = client.post(system=bigip, uri="/mgmt/tm/util/bash", data=payload, headers=headers)
+    if resp.status_code != 200:
+        return False
+    
     return True
 
 '''
@@ -302,7 +318,7 @@ parser = argparse.ArgumentParser(
                     prog='F5 API Automation Client',
                     description='Automate simple F5 BIG-IP tasks',
                     epilog='With great power comes great responsibility.')
-parser.add_argument('action', help='Action to perform', choices=['update_irule','show_bigips','unused_pools','upload_file'])
+parser.add_argument('action', choices=['update_irule','show_bigips','unused_pools','upload_file','move_file','linux_command'], help='Action to perform. upload_file supports for changing permissions and moving files.')
 parser.add_argument('-b', '--bigips', help='Select a category of hosts to apply the task to', required=True)
 parser.add_argument('-u', '--username', help='BIG-IP username')
 parser.add_argument('-p', '--password', help='BIG-IP password')
@@ -313,6 +329,8 @@ parser.add_argument('--irule_name', help='Name of iRule to update. Required for 
 parser.add_argument('--irule_content', help='File with content for iRule update. Required for update_irule action')
 parser.add_argument('--file_name', help='File to upload')
 parser.add_argument('--file_location', help='Location where to upload the file')
+parser.add_argument('--file_permissions', help='Permissions to set on the uploaded file (e.g. 644)')
+parser.add_argument('--linux_command', help='Linux command to execute on the BIG-IP.')
 args = parser.parse_args()
 
 
@@ -376,8 +394,46 @@ match args.action:
 
         for host in yaml_content[args.bigips]['hosts']:
             bigip = BIGIP(name=host, verifyCert=ca)
-            success = upload_file(bigip=bigip, client=client, location=args.file_location, filename=args.file_name)
-            if success:
+            upload_success = upload_file(bigip=bigip, client=client, location=args.file_location, filename=args.file_name)
+            if upload_success:
                 print(f'{bigip.name}: upload successful')
             else:
                 print(f'{bigip.name}: upload failed')
+
+            if args.file_name[-4:] != '.iso':
+                '''
+                ISO Files are already in the right location, no need to change permissions or move them
+                '''
+                if args.permissions != None and args.permissions != '':
+                    chmod_success = linux_command(bigip=bigip, client=client, command=f'chmod {args.permissions} /var/config/rest/downloads/{args.file_name}')
+                    if chmod_success:
+                        print(f'{bigip.name}: {args.file_name} permissions set to {args.permissions}')
+                    else:
+                        print(f'{bigip.name}: setting permissions failed')
+
+                if args.file_location != None and args.file_location != '':
+                    move_success = move_file(bigip=bigip, client=client, source=f'/var/config/rest/downloads/{args.file_name}', destination=args.file_location)
+                    if move_success:
+                        print(f'{bigip.name}: {args.file_name} moved to {args.file_location}')
+                    else:
+                        print(f'{bigip.name}: moving file failed')
+    case 'move_file':
+        if args.file_name == None or args.file_location == None:
+            raise Exception('move_file module requires flags --file_name and --file_location')
+        for host in yaml_content[args.bigips]['hosts']:
+            bigip = BIGIP(name=host, verifyCert=ca)
+            move_success = move_file(bigip=bigip, client=client, source=args.file_name, destination=args.file_location)
+            if move_success:
+                print(f'{bigip.name}: {args.file_name} moved to {args.file_location}')
+            else:
+                print(f'{bigip.name}: moving file failed')
+    case 'linux_command':
+        if args.linux_command == None:
+            raise Exception('linux_command module requires flag --command')
+        for host in yaml_content[args.bigips]['hosts']:
+            bigip = BIGIP(name=host, verifyCert=ca)
+            command_success = linux_command(bigip=bigip, client=client, command=args.linux_command)
+            if command_success:
+                print(f'{bigip.name}: Command executed successfully')
+            else:
+                print(f'{bigip.name}: Command execution failed')
