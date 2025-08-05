@@ -95,19 +95,19 @@ class APIClient:
                 response = session.delete(url=f'https://{system.name}:{system.port}{uri}', headers=headers, verify=bigip.verifyCert)
                 return response 
 
-    def get(self, system:BIGIP, uri:str, headers:dict):
+    def get(self, system:BIGIP, uri:str, headers:dict=dict()):
         return self.__api_call(system=system, method='get', uri=uri, headers=headers)
     
-    def delete(self, system:BIGIP, uri:str, headers:dict):
+    def delete(self, system:BIGIP, uri:str, headers:dict=dict()):
         return self.__api_call(system=system, method='delete', uri=uri, headers=headers)
     
-    def post(self, system:BIGIP, uri:str, headers:dict, data:dict=dict(), json:bool=True):
+    def post(self, system:BIGIP, uri:str, headers:dict=dict(), data:dict=dict(), json:bool=True):
         return self.__api_call(system=system, method='post', uri=uri, headers=headers, data=data, json=json)
 
-    def put(self, system:BIGIP, uri:str, headers:dict, data:dict=dict()):
+    def put(self, system:BIGIP, uri:str, headers:dict=dict(), data:dict=dict()):
         return self.__api_call(system=system, method='put', uri=uri, headers=headers, data=data)
     
-    def patch(self, system:BIGIP, uri:str, headers:dict, data:dict=dict()):
+    def patch(self, system:BIGIP, uri:str, headers:dict=dict(), data:dict=dict()):
         return self.__api_call(system=system, method='patch', uri=uri, headers=headers, data=data)
 
 '''
