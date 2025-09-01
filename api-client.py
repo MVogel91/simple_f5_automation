@@ -18,9 +18,10 @@ class BIGIP:
 class APIClient:
     http_sessions = dict()
 
-    def __init__(self, username:str, password:str):
+    def __init__(self, username:str, password:str, proxies:dict={}):
         self.__username = username
         self.__password = password
+        self.__proxies = proxies
     
     def __authenticate(self, system:BIGIP, session:requests.Session=requests.Session()):
         uri = f'https://{system.name}/mgmt/shared/authn/login'
@@ -53,6 +54,8 @@ class APIClient:
 
     def __create_session(self, system:BIGIP):
         session = requests.Session()
+        if self.__proxies is not {}:
+            session.proxies.update(self.__proxies)
         self.__authenticate(system=system, session=session)
 
     def __api_call(self, system:BIGIP, method:str, uri:str, headers:dict, data:dict=dict(), json:bool=True):
@@ -65,16 +68,22 @@ class APIClient:
         if uri == '':
             raise Exception ('No URI specified')
 
+        session = requests.Session()
+        if self.__proxies is not {}:
+            session.proxies.update(self.__proxies)
+
         token = self.__get_or_create_session(system=system)["token"]["value"]
+        headers['X-F5-Auth-Token'] = token
+
         default_headers = {
-            'Accept-Encoding': 'application/json',
-            'X-F5-Auth-Token': token
+            'Accept-Encoding': 'application/json'
+									
         }
         for header in default_headers:
             if header not in headers:
                 headers[header] = default_headers[header]
 
-        session = requests.Session()
+									
         match method:
             case 'get':
                 response = session.get(url=f'https://{system.name}:{system.port}{uri}', headers=headers, verify=bigip.verifyCert)
@@ -123,24 +132,38 @@ def backup_and_update_iRule(bigip:BIGIP, client:dict, rule:str, new_rule:str):
         if irule_definition == new_rule:
             # Requirement already satisfied
             print(f'{bigip.name}: {rule}: iRule already up to date')
-            return
+        else:
+            response = client.post(system=bigip, uri=f'/mgmt/tm/ltm/rule', data={'name': f'{rule}_backup', 'apiAnonymous': f'{irule_definition}'})
+            if response.status_code == 409:
+                # Backup exists
+                response = client.put(system=bigip, uri=f'/mgmt/tm/ltm/rule/{rule}_backup', data={'apiAnonymous': f'{irule_definition}'})
+                if response.status_code == 200:
+                    print(f'{bigip.name}: {rule}: Older Backup existed, overwritten')
+            elif response.status_code == 200:
+                # Backup created
+                print(f'{bigip.name}: {rule}: Backup successfully created')
+            else:
+                print(f'{bigip.name}: {rule}: Status: {response.status_code} Content: {response.content}')
 
-        response = client.post(system=bigip, uri=f'/mgmt/tm/ltm/rule', data={'name': f'{rule}_backup', 'apiAnonymous': f'{irule_definition}'})
-        if response.status_code == 409:
-            # Backup exists
-            response = client.put(system=bigip, uri=f'/mgmt/tm/ltm/rule/{rule}_backup', data={'apiAnonymous': f'{irule_definition}'})
+																																			  
+									   
+						   
+            response = client.put(system=bigip, uri=f'/mgmt/tm/ltm/rule/{rule}', data={'apiAnonymous': f'{new_rule}'})
             if response.status_code == 200:
-                print(f'{bigip.name}: {rule}: Older Backup existed, overwritten')
-        elif response.status_code == 200:
-            # Backup created
-            print(f'{bigip.name}: {rule}: Backup successfully created')
+                # iRule updated
+                print(f'{bigip.name}: {rule}: iRule successfully updated')
+            else:
+                print(f'{bigip.name}: {rule}: Status: {response.status_code} Content: {response.content}')
+																	   
 
-        response = client.put(system=bigip, uri=f'/mgmt/tm/ltm/rule/{rule}', data={'apiAnonymous': f'{new_rule}'})
-        if response.status_code == 200:
-            # iRule updated
-            print(f'{bigip.name}: {rule}: iRule successfully updated')
+																												  
+									   
+						   
+																	  
     elif response.status_code == 404:
         print(f'{bigip.name}: {rule}: iRule non-existant on system')
+    else:
+        print(f'{bigip.name}: {rule}: Status: {response.status_code} Content: {response.content}')
 
 def find_unused_pools(bigip:BIGIP, client:dict):
     '''
@@ -311,6 +334,15 @@ def linux_command(bigip:BIGIP, client:dict, command:str):
     
     return True
 
+def test_connectivity(bigip:BIGIP, client:dict):
+    '''
+    Test connectivity to a given BIG-IP
+    '''
+    resp = client.get(system=bigip, uri="/mgmt/tm/sys/version")
+    if resp.status_code in [200, 401]:
+        return True
+    return False
+
 '''
 Arguments Parser
 '''
@@ -318,12 +350,13 @@ parser = argparse.ArgumentParser(
                     prog='F5 API Automation Client',
                     description='Automate simple F5 BIG-IP tasks',
                     epilog='With great power comes great responsibility.')
-parser.add_argument('action', choices=['update_irule','show_bigips','unused_pools','upload_file','move_file','linux_command'], help='Action to perform. upload_file supports for changing permissions and moving files.')
+parser.add_argument('action', choices=['update_irule','show_bigips','unused_pools','upload_file','move_file','linux_command','test_connectivity'], help='Action to perform. upload_file supports for changing permissions and moving files.')
 parser.add_argument('-b', '--bigips', help='Select a category of hosts to apply the task to', required=True)
 parser.add_argument('-u', '--username', help='BIG-IP username')
 parser.add_argument('-p', '--password', help='BIG-IP password')
 parser.add_argument('-i', '--inventory_file', help='YAML inventory file or directory', default='inventory/hosts.yaml')
 parser.add_argument('-k', '--ignore_cert', help='completely ignore Certificate issues on BIG-IP', action='store_true', default=False)
+parser.add_argument('-x', '--proxy', help='Specify a proxy to make the connections', default=None)
 parser.add_argument('--ca_file', help='CA file to trust for BIG-IP certificates')
 parser.add_argument('--irule_name', help='Name of iRule to update. Required for update_irule action')
 parser.add_argument('--irule_content', help='File with content for iRule update. Required for update_irule action')
@@ -367,7 +400,21 @@ if args.action != 'show_bigips':
     else:
         ca = args.ca_file
 
-    client = APIClient(username=username,password=password)
+    if args.proxy is not None:
+        if 'http' in args.proxy:
+            proxies = {
+                'http': args.proxy,
+                'https': args.proxy
+            }
+        else:
+            proxies = {
+                'http': f'http://{args.proxy}',
+                'https': f'http://{args.proxy}'
+            }
+    else:
+        proxies={}
+    
+    client = APIClient(username=username,password=password,proxies=proxies)
 
 '''
 Actions
@@ -437,3 +484,9 @@ match args.action:
                 print(f'{bigip.name}: Command executed successfully')
             else:
                 print(f'{bigip.name}: Command execution failed')
+    case 'test_connectivity':
+        for host in yaml_content[args.bigips]['hosts']:
+            bigip = BIGIP(name=host, verifyCert=ca)
+            connectivity = test_connectivity(bigip=bigip, client=client)
+            if connectivity:
+                print(f'{bigip.name}: Connectivity successful')
