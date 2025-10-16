@@ -10,10 +10,17 @@ import os
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class BIGIP:
-    def __init__(self, name:str, port:int=443, verifyCert=True):
+    def __init__(self, name:str, port:int=0, verifyCert:bool=True, operating_system:str='tmos'):
         self.name = name.lower()
-        self.port = port
+        if port == 0:
+            if operating_system == 'f5os':
+                self.port = 8888
+            elif operating_system == 'tmos':
+                self.port = 443
+        else:
+            self.port = port
         self.verifyCert = verifyCert
+        self.os = operating_system
 
 class APIClient:
     http_sessions = dict()
@@ -24,24 +31,42 @@ class APIClient:
         self.__proxies = proxies
     
     def __authenticate(self, system:BIGIP, session:requests.Session=requests.Session()):
-        uri = f'https://{system.name}/mgmt/shared/authn/login'
-        body = {
-            "username":self.__username,
-            "password":self.__password,
-            "loginProviderName":"tmos"
-            }
-        response = session.post(url=uri, json=body, verify=system.verifyCert)
-
-        if response.status_code == 200:
-            response_json = json.loads(response.text)
-            APIClient.http_sessions[system] = {
-                "token" : {
-                    "value": response_json['token']['token'],
-                    "expires": response_json['token']['expirationMicros']
+        if system.os == 'tmos':
+            uri = f'https://{system.name}/mgmt/shared/authn/login'
+            body = {
+                "username":self.__username,
+                "password":self.__password,
+                "loginProviderName":"tmos"
                 }
+            response = session.post(url=uri, json=body, verify=system.verifyCert)
+
+            if response.status_code == 200:
+                response_json = json.loads(response.text)
+                APIClient.http_sessions[system] = {
+                    "token" : {
+                        "value": response_json['token']['token'],
+                        "expires": response_json['token']['expirationMicros']
+                    }
+                }
+            else:
+                raise Exception (f'Authentication failed!\r\n{response.text}')
+        elif system.os == 'f5os':
+            uri = f'https://{system.name}:{system.port}/restconf/'
+            basic_credentials = requests.auth.HTTPBasicAuth(self.__username, self.__password)
+            headers = {
+                'Content-Type': 'application/yang-data+json',
             }
-        else:
-            raise Exception (f'Authentication failed!\r\n{response.text}')
+            response = session.get(url=uri, headers=headers, auth=basic_credentials, verify=system.verifyCert)
+            if response.status_code == 200 and 'X-Auth-Token' in response.headers.keys():
+                APIClient.http_sessions[system] = {
+                    "token": {
+                        "value": response.headers.get('X-Auth-Token'),
+                        "expires": datetime.datetime.now().microsecond + datetime.timedelta(minutes=15).microseconds
+                    }
+                }
+            else:
+                raise Exception (f'Authentication failed!\r\n{response.text}')
+
         
 
     def __get_or_create_session(self, system:BIGIP):
@@ -73,35 +98,39 @@ class APIClient:
             session.proxies.update(self.__proxies)
 
         token = self.__get_or_create_session(system=system)["token"]["value"]
-        headers['X-F5-Auth-Token'] = token
+        if system.os == 'tmos':
+            headers['X-F5-Auth-Token'] = token
+            default_headers = {
+                'Accept-Encoding': 'application/json'
+            }
+        elif system.os == 'f5os':
+            headers['X-Auth-Token'] = token
+            default_headers = {
+                'Accept': 'application/yang-data+json'
+            }
 
-        default_headers = {
-            'Accept-Encoding': 'application/json'
-									
-        }
         for header in default_headers:
             if header not in headers:
                 headers[header] = default_headers[header]
 
-									
         match method:
             case 'get':
-                response = session.get(url=f'https://{system.name}:{system.port}{uri}', headers=headers, verify=bigip.verifyCert)
+                response = session.get(url=f'https://{system.name}:{system.port}{uri}', headers=headers, verify=system.verifyCert)
                 return response
             case 'post':
                 if json == True:
-                    response = session.post(url=f'https://{system.name}:{system.port}{uri}', headers=headers, json=data, verify=bigip.verifyCert)
+                    response = session.post(url=f'https://{system.name}:{system.port}{uri}', headers=headers, json=data, verify=system.verifyCert)
                 else:
-                    response = session.post(url=f'https://{system.name}:{system.port}{uri}', headers=headers, data=data, verify=bigip.verifyCert)
+                    response = session.post(url=f'https://{system.name}:{system.port}{uri}', headers=headers, data=data, verify=system.verifyCert)
                 return response
             case 'put':
-                response = session.put(url=f'https://{system.name}:{system.port}{uri}', headers=headers, json=data, verify=bigip.verifyCert)
+                response = session.put(url=f'https://{system.name}:{system.port}{uri}', headers=headers, json=data, verify=system.verifyCert)
                 return response
             case 'patch':
-                response = session.patch(url=f'https://{system.name}:{system.port}{uri}', headers=headers, json=data, verify=bigip.verifyCert)
+                response = session.patch(url=f'https://{system.name}:{system.port}{uri}', headers=headers, json=data, verify=system.verifyCert)
                 return response
             case 'delete':
-                response = session.delete(url=f'https://{system.name}:{system.port}{uri}', headers=headers, verify=bigip.verifyCert)
+                response = session.delete(url=f'https://{system.name}:{system.port}{uri}', headers=headers, verify=system.verifyCert)
                 return response 
 
     def get(self, system:BIGIP, uri:str, headers:dict=dict()):
@@ -118,6 +147,14 @@ class APIClient:
     
     def patch(self, system:BIGIP, uri:str, headers:dict=dict(), data:dict=dict()):
         return self.__api_call(system=system, method='patch', uri=uri, headers=headers, data=data)
+
+def sizeof_fmt(num, suffix="B"):
+    num = int(num)
+    for unit in ("", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi"):
+        if abs(num) < 1024.0:
+            return f"{num:3.1f}{unit}{suffix}"
+        num /= 1024.0
+    return f"{num:.1f}Yi{suffix}"
 
 '''
 Supported features
@@ -145,21 +182,12 @@ def backup_and_update_iRule(bigip:BIGIP, client:dict, rule:str, new_rule:str):
             else:
                 print(f'{bigip.name}: {rule}: Status: {response.status_code} Content: {response.content}')
 
-																																			  
-									   
-						   
             response = client.put(system=bigip, uri=f'/mgmt/tm/ltm/rule/{rule}', data={'apiAnonymous': f'{new_rule}'})
             if response.status_code == 200:
                 # iRule updated
                 print(f'{bigip.name}: {rule}: iRule successfully updated')
             else:
                 print(f'{bigip.name}: {rule}: Status: {response.status_code} Content: {response.content}')
-																	   
-
-																												  
-									   
-						   
-																	  
     elif response.status_code == 404:
         print(f'{bigip.name}: {rule}: iRule non-existant on system')
     else:
@@ -332,16 +360,73 @@ def linux_command(bigip:BIGIP, client:dict, command:str):
     if resp.status_code != 200:
         return False
     
-    return True
+    return True, resp.json()["commandResult"]
 
 def test_connectivity(bigip:BIGIP, client:dict):
     '''
     Test connectivity to a given BIG-IP
     '''
-    resp = client.get(system=bigip, uri="/mgmt/tm/sys/version")
-    if resp.status_code in [200, 401]:
-        return True
-    return False
+    if bigip.os == 'tmos':
+        resp = client.get(system=bigip, uri="/mgmt/tm/sys/version")
+        if resp.status_code in [200, 401]:
+            return True
+        return False
+    elif bigip.os == 'f5os':
+        resp = client.get(system=bigip, uri="/restconf")
+        if resp.status_code in [200, 401]:
+            return True
+        return False
+
+def get_lags(bigip:BIGIP, client:dict):
+    resp = client.get(system=bigip, uri="/restconf/data/openconfig-interfaces:interfaces/interface")
+    interfaces = resp.json()["openconfig-interfaces:interface"]
+    for interface in interfaces:
+        if "openconfig-if-aggregate:aggregation" in interface:
+            print(f'{bigip.name}: {interface["name"]}: {interface["openconfig-if-aggregate:aggregation"]["config"]}')
+
+def unassociated_vlans(bigip:BIGIP, client:dict):
+    resp = client.get(system=bigip, uri="/restconf/data/openconfig-vlan:vlans/vlan")
+    vlans = resp.json()["openconfig-vlan:vlan"]
+    for vlan in vlans:
+        if "members" not in vlan:
+            print(f'{bigip.name}: {vlan["vlan-id"]} ({vlan["config"]["name"]}): not associated with an interface or LAG')
+
+def empty_interfaces(bigip:BIGIP, client:dict):
+    resp = client.get(system=bigip, uri="/restconf/data/openconfig-interfaces:interfaces/interface")
+    interfaces = resp.json()["openconfig-interfaces:interface"]
+    for interface in interfaces:
+        if interface["name"] == "mgmt":
+            continue
+        state = interface["state"]
+        if state["oper-status"] == "UP":
+            if state["type"] == "iana-if-type:ethernetCsmacd":
+                #physical
+                try:
+                    trunk = interface["openconfig-if-ethernet:ethernet"]["config"]["openconfig-if-aggregate:aggregate-id"]
+                    continue
+                except KeyError:
+                    try:
+                        vlans = interface["openconfig-if-ethernet:ethernet"]["openconfig-vlan:switched-vlan"]["config"]["trunk-vlans"]
+                    except KeyError:
+                        try:
+                            vlans = interface["openconfig-if-ethernet:ethernet"]["openconfig-vlan:switched-vlan"]["config"]["native-vlan"]
+                        except KeyError:
+                            print(f'{bigip.name}: {interface["name"]}: UP but neither in Trunk nor VLANs associated')
+                        else:
+                            print(f'{bigip.name}: {interface["name"]}: Only native VLANs associated')
+                            
+            else:
+                try:
+                    vlans = interface["openconfig-if-aggregate:aggregation"]["openconfig-vlan:switched-vlan"]["config"]["trunk-vlans"]
+                except KeyError:
+                    print(f'{bigip.name}: {interface["name"]}: UP but no VLANs associated')
+
+def disk_usage(bigip:BIGIP, client:dict):
+    resp = client.get(system=bigip, uri="/restconf/data/openconfig-platform:components/component=platform/state")
+    areas = resp.json()["openconfig-platform:state"]["f5-platform:file-systems"]["file-system"]
+    for area in areas:
+        print(f'{bigip.name}: {area['category']}-{area['area']}: {area['used-percent']}% ({sizeof_fmt(area['used'])} / {sizeof_fmt(area['total'])})')
+    print("")
 
 '''
 Arguments Parser
@@ -350,7 +435,19 @@ parser = argparse.ArgumentParser(
                     prog='F5 API Automation Client',
                     description='Automate simple F5 BIG-IP tasks',
                     epilog='With great power comes great responsibility.')
-parser.add_argument('action', choices=['update_irule','show_bigips','unused_pools','upload_file','move_file','linux_command','test_connectivity'], help='Action to perform. upload_file supports for changing permissions and moving files.')
+parser.add_argument('action', choices=[
+    'update_irule',
+    'show_bigips',
+    'unused_pools',
+    'upload_file',
+    'move_file',
+    'linux_command',
+    'test_connectivity',
+    'lag_conf',
+    'unassociated_vlans',
+    'empty_interfaces',
+    'disk_usage'
+    ], help='Action to perform. upload_file supports for changing permissions and moving files.')
 parser.add_argument('-b', '--bigips', help='Select a category of hosts to apply the task to', required=True)
 parser.add_argument('-u', '--username', help='BIG-IP username')
 parser.add_argument('-p', '--password', help='BIG-IP password')
@@ -430,7 +527,10 @@ match args.action:
             backup_and_update_iRule(bigip=bigip, client=client, rule=args.irule_name, new_rule=irule_content)
     case 'show_bigips':
         for host in yaml_content[args.bigips]['hosts']:
-            print(host)
+            try:
+                print(host + " (via Proxy: " + yaml_content[args.bigips]['hosts'][host]['proxy'] + ")")
+            except TypeError:
+                print(host)
     case 'unused_pools':
         for host in yaml_content[args.bigips]['hosts']:
             bigip = BIGIP(name=host, verifyCert=ca)
@@ -480,13 +580,42 @@ match args.action:
         for host in yaml_content[args.bigips]['hosts']:
             bigip = BIGIP(name=host, verifyCert=ca)
             command_success = linux_command(bigip=bigip, client=client, command=args.linux_command)
-            if command_success:
-                print(f'{bigip.name}: Command executed successfully')
+            if command_success[0] is True:
+                print(f'{bigip.name}: success:')
+                for line in command_success[1].rstrip().split("\n"):
+                    print(f'{bigip.name}:     {line}')
+                print("")
             else:
-                print(f'{bigip.name}: Command execution failed')
+                print(f'{bigip.name}: failed:  {command_success[1]}')
     case 'test_connectivity':
+        if 'os' in yaml_content[args.bigips]:
+            operating_system = yaml_content[args.bigips]['os']
+        else:
+            operating_system = None
         for host in yaml_content[args.bigips]['hosts']:
-            bigip = BIGIP(name=host, verifyCert=ca)
+            if operating_system is not None:
+                bigip = BIGIP(name=host, verifyCert=ca, operating_system=operating_system)
+            else:
+                bigip = BIGIP(name=host, verifyCert=ca)
             connectivity = test_connectivity(bigip=bigip, client=client)
             if connectivity:
                 print(f'{bigip.name}: Connectivity successful')
+    case 'lag_conf':
+        for host in yaml_content[args.bigips]['hosts']:
+            bigip = BIGIP(name=host, verifyCert=ca, operating_system='f5os')
+            get_lags(bigip=bigip, client=client)
+    
+    case 'unassociated_vlans':
+        for host in yaml_content[args.bigips]['hosts']:
+            bigip = BIGIP(name=host, verifyCert=ca, operating_system='f5os')
+            unassociated_vlans(bigip=bigip, client=client)
+
+    case 'empty_interfaces':
+        for host in yaml_content[args.bigips]['hosts']:
+            bigip = BIGIP(name=host, verifyCert=ca, operating_system='f5os')
+            empty_interfaces(bigip=bigip, client=client)
+    
+    case 'disk_usage':
+         for host in yaml_content[args.bigips]['hosts']:
+            bigip = BIGIP(name=host, verifyCert=ca, operating_system='f5os')
+            disk_usage(bigip=bigip, client=client)
