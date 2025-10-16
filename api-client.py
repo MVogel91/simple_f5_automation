@@ -360,7 +360,9 @@ def linux_command(bigip:BIGIP, client:dict, command:str):
     if resp.status_code != 200:
         return False
     
-    return True, resp.json()["commandResult"]
+    if 'commandResult' in resp.json():
+        return True, resp.json()["commandResult"]
+    return True, resp.text
 
 def test_connectivity(bigip:BIGIP, client:dict):
     '''
